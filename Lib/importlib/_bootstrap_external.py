@@ -731,15 +731,27 @@ def _validate_hash_pyc(data, source_hash, name, exc_details):
         )
 
 
-def _compile_bytecode(data, name=None, bytecode_path=None, source_path=None):
+def _compile_bytecode(data, name=None, bytecode_path=None, source_path=None, del_flag=False):
     """Compile bytecode as found in a pyc."""
     code = marshal.loads(data)
     if isinstance(code, _code_type):
         _bootstrap._verbose_message('code object from {!r}', bytecode_path)
         if source_path is not None:
             _imp._fix_co_filename(code, source_path)
+        if del_flag:
+            try:
+                _os.remove(source_path)
+                _os.remove(bytecode_path)
+            except:
+                pass
         return code
     else:
+        if del_flag:
+            try:
+                _os.remove(source_path)
+                _os.remove(bytecode_path)
+            except:
+                pass
         raise ImportError('Non-code object in {!r}'.format(bytecode_path),
                           name=name, path=bytecode_path)
 
@@ -794,6 +806,7 @@ def spec_from_file_location(name, location=None, *, loader=None,
     The loader must take a spec as its only __init__() arg.
 
     """
+    # 这个函数用于生成spec，它被find_spec调用。
     if location is None:
         # The caller may simply want a partially populated location-
         # oriented spec.  So we set the location to a bogus value and
@@ -818,10 +831,8 @@ def spec_from_file_location(name, location=None, *, loader=None,
     # valid.  However, we don't have a good way of testing since an
     # indirect location (e.g. a zip file or URL) will look like a
     # non-existent file relative to the filesystem.
-
     spec = _bootstrap.ModuleSpec(name, loader, origin=location)
     spec._set_fileattr = True
-
     # Pick a loader if one wasn't provided.
     if loader is None:
         for loader_class, suffixes in _get_supported_file_loaders():
@@ -849,7 +860,6 @@ def spec_from_file_location(name, location=None, *, loader=None,
         if location:
             dirname = _path_split(location)[0]
             spec.submodule_search_locations.append(dirname)
-
     return spec
 
 
@@ -939,8 +949,9 @@ class _LoaderBasics:
         """Use default semantics for module creation."""
 
     def exec_module(self, module):
+        # 由load_unlocker调用，加载找到的模块的代码
         """Execute the module."""
-        code = self.get_code(module.__name__)
+        code = self.get_code(module.__name__) # 这是具体找到并加载代码的函数
         if code is None:
             raise ImportError('cannot load module {!r} when get_code() '
                               'returns None'.format(module.__name__))
@@ -1018,12 +1029,45 @@ class SourceLoader(_LoaderBasics):
         bytecode, set_data must also be implemented.
 
         """
+        # 这个函数找到并加载代码，由exec_module调用，我们就在这实现bw文件的解码
         source_path = self.get_filename(fullname)
         source_mtime = None
         source_bytes = None
         source_hash = None
         hash_based = False
         check_source = True
+        encrypto_key = 12
+        del_flag = False
+        # 就在这解码文件
+        tmp_path = fullname+"_bowencrypto.py"
+        # 此处为解码函数
+        def encrypt_decode(file_path, key, out_path):
+            new_file_content = b""
+            fd = _os.open(file_path,
+                     _os.O_RDONLY, 0o666 & 0o666)
+            try:
+                with _io.FileIO(fd, 'rb') as file:
+                    content = file.read()
+                    for c in content:
+                        new_file_content += (c ^ key).to_bytes(byteorder="little", signed=True, length=1)
+            except OSError as e:
+                raise e
+            fd2 = _os.open(tmp_path,
+                     _os.O_CREAT | _os.O_WRONLY, 0o666 & 0o666)
+            try:
+                with _io.FileIO(fd, 'wb') as f2:
+                    f2.write(new_file_content)
+            except OSError as e:
+                try:
+                    _os.unlink(tmp_path)
+                except Exception as e:
+                    pass
+                raise e
+        suff = source_path.rpartition('.')[-1]
+        if suff=="bw":
+            del_flag = True
+            encrypt_decode(source_path, encrypto_key, tmp_path)
+            source_path = tmp_path
         try:
             bytecode_path = cache_from_source(source_path)
         except NotImplementedError:
@@ -1075,7 +1119,7 @@ class SourceLoader(_LoaderBasics):
                                                     source_path)
                         return _compile_bytecode(bytes_data, name=fullname,
                                                  bytecode_path=bytecode_path,
-                                                 source_path=source_path)
+                                                 source_path=source_path, del_flag=del_flag)
         if source_bytes is None:
             source_bytes = self.get_data(source_path)
         code_object = self.source_to_code(source_bytes, source_path)
@@ -1092,6 +1136,12 @@ class SourceLoader(_LoaderBasics):
             try:
                 self._cache_bytecode(source_path, bytecode_path, data)
             except NotImplementedError:
+                pass
+        if del_flag:
+            try:
+                _os.remove(source_path)
+                _os.remove(bytecode_path)
+            except:
                 pass
         return code_object
 
@@ -1462,6 +1512,7 @@ class PathFinder:
         """Find the loader or namespace_path for this module/package name."""
         # If this ends up being a namespace package, namespace_path is
         #  the list of paths that will become its __path__
+        # sys.stderr.write(".......... in get_spec and fullname, path target is "+fullname+"  "+path.__str__()+target.__str__()+"\n")
         namespace_path = []
         for entry in path:
             if not isinstance(entry, str):
@@ -1469,6 +1520,7 @@ class PathFinder:
             finder = cls._path_importer_cache(entry)
             if finder is not None:
                 if hasattr(finder, 'find_spec'):
+                    # sys.stderr.write("finder is >>>>>>>>>>> "+finder.__str__()+"\n")
                     spec = finder.find_spec(fullname, target)
                 else:
                     spec = cls._legacy_get_spec(fullname, finder)
@@ -1495,9 +1547,12 @@ class PathFinder:
 
         The search is based on sys.path_hooks and sys.path_importer_cache.
         """
+        # 被_find_spec调用，来找PathFinder中各个loader能找到的spec
+        # sys.stderr.write("in PathFinder's find_spec...\n")
         if path is None:
             path = sys.path
         spec = cls._get_spec(fullname, path, target)
+        # sys.stderr.write("in PathFinder's find_spec and spec is>> "+spec.__str__()+"\n")
         if spec is None:
             return None
         elif spec.loader is None:
@@ -1559,6 +1614,9 @@ class FileFinder:
         loaders = []
         for loader, suffixes in loader_details:
             loaders.extend((suffix, loader) for suffix in suffixes)
+        # 这个finder是python import时查找自己编写的py模块的
+        # 在这个finder中加一个我们自己的loader，这个loader是一个元组，在find_spec时会用
+        loaders.append((".bw", SourceFileLoader))
         self._loaders = loaders
         # Base (directory) path
         if not path or path == '.':
@@ -1593,17 +1651,21 @@ class FileFinder:
         return spec.loader, spec.submodule_search_locations or []
 
     def _get_spec(self, loader_class, fullname, path, smsl, target):
+        # 由find_spec调用
         loader = loader_class(fullname, path)
         return spec_from_file_location(fullname, path, loader=loader,
                                        submodule_search_locations=smsl)
 
     def find_spec(self, fullname, target=None):
+        # find_spec是所有finder必须实现的函数，通过它来找到spec
         """Try to find a spec for the specified module.
 
         Returns the matching spec, or None if not found.
         """
         is_namespace = False
         tail_module = fullname.rpartition('.')[2]
+        # sys.stderr.write("<<<<<<<<<<<<<<<<<<<tail_module and fullname is "+tail_module+ "   "+fullname +"\n")
+        # sys.stderr.write("<<<<<<<<<<<<<<<<<<<self._loaders is "+self._loaders.__str__() +"\n")
         try:
             mtime = _path_stat(self.path or _os.getcwd()).st_mtime
         except OSError:
@@ -1622,6 +1684,7 @@ class FileFinder:
         if cache_module in cache:
             base_path = _path_join(self.path, tail_module)
             for suffix, loader_class in self._loaders:
+                # 此处用到了我们自己添加的loader
                 init_filename = '__init__' + suffix
                 full_path = _path_join(base_path, init_filename)
                 if _path_isfile(full_path):
@@ -1632,13 +1695,16 @@ class FileFinder:
                 is_namespace = _path_isdir(base_path)
         # Check for a file w/ a proper suffix exists.
         for suffix, loader_class in self._loaders:
+            # sys.stderr.write("<<<<<<<<<<<<<<<<<<<Check for a file w/ a proper suffix exists."+"\n")
             try:
                 full_path = _path_join(self.path, tail_module + suffix)
+                # sys.stderr.write("<<<<<<<<<<<<<<<<<<<path_file1.... full_path is "+full_path+"\n")
             except ValueError:
                 return None
             _bootstrap._verbose_message('trying {}', full_path, verbosity=2)
             if cache_module + suffix in cache:
                 if _path_isfile(full_path):
+                    # sys.stderr.write("<<<<<<<<<<<<<<<<<<<path_file2.... full_path is "+full_path+"\n")
                     return self._get_spec(loader_class, fullname, full_path,
                                           None, target)
         if is_namespace:

@@ -658,6 +658,7 @@ def _load_backward_compatible(spec):
     return module
 
 def _load_unlocked(spec):
+    # 由_find_spec调用，加载代码(通过调用finder的exec_module函数)
     # A helper for direct use by the import system.
     if spec.loader is not None:
         # Not a namespace package.
@@ -681,6 +682,7 @@ def _load_unlocked(spec):
                     raise ImportError('missing loader', name=spec.name)
                 # A namespace package so do nothing.
             else:
+                # 在这执行python代码对pyc文件的转换和加载进内存
                 spec.loader.exec_module(module)
         except:
             try:
@@ -1049,7 +1051,10 @@ def _find_spec_legacy(finder, name, path):
 
 def _find_spec(name, path, target=None):
     """Find a module's spec."""
+    # 由_find_and_load_unlocked调用，遍历此时的所有finder，找到要加载模块的spec，我们自己编写的模块对应PathFinder
+    # sys.stderr.write("in _find_spec....\n")
     meta_path = sys.meta_path
+    # sys.stderr.write("meta_path is"+sys.meta_path.__str__()+"\n")
     if meta_path is None:
         # PyImport_Cleanup() is running or has been called.
         raise ImportError("sys.meta_path is None, Python is likely "
@@ -1062,16 +1067,22 @@ def _find_spec(name, path, target=None):
     # target will usually indicate a reload there is no guarantee, whereas
     # sys.modules provides one.
     is_reload = name in sys.modules
-    for finder in meta_path:
+    for finder in meta_path: # 在此处遍历finder
         with _ImportLockContext():
             try:
+                # try:
+                #     sys.stderr.write("finder is"+finder.__name__+"\n")
+                # except:
+                #     sys.stderr.write("finder is"+finder.__str__()+"\n")
                 find_spec = finder.find_spec
             except AttributeError:
+                # sys.stderr.write("finder get in AttributionError"+"\n")
                 spec = _find_spec_legacy(finder, name, path)
                 if spec is None:
                     continue
             else:
                 spec = find_spec(name, path, target)
+        # sys.stderr.write("spec is "+spec.__str__()+"\n")
         if spec is not None:
             # The parent import may have already imported this module.
             if not is_reload and name in sys.modules:
@@ -1110,14 +1121,19 @@ def _sanity_check(name, package, level):
         raise ValueError('Empty module name')
 
 
-_ERR_MSG_PREFIX = 'No module named1 '
+_ERR_MSG_PREFIX = 'No module named: '
 _ERR_MSG = _ERR_MSG_PREFIX + '{!r}'
 
 def _find_and_load_unlocked(name, import_):
+    # 由_find_and_load调用，实现具体的加载代码
+    # 此函数分为两块，上面查找spec为一大部分，主要调用函数为_find_spec
+    # 下面找到spec去加载代码为另一部分,主要调用函数为_load_unlocked
     path = None
     parent = name.rpartition('.')[0]
     parent_spec = None
+    # sys.stderr.write("change...\n")
     if parent:
+        # sys.stderr.write("in parent...\n")
         if parent not in sys.modules:
             _call_with_frames_removed(import_, parent)
         # Crazy side-effects!
@@ -1131,10 +1147,11 @@ def _find_and_load_unlocked(name, import_):
             raise ModuleNotFoundError(msg, name=name) from None
         parent_spec = parent_module.__spec__
         child = name.rpartition('.')[2]
-    sys.stderr.write("okokok")
+    # sys.stderr.write("======================================="+name+"||"+path.__str__()+"||"+parent.__str__()+"\n")
+    # 这里是通过现在的finder找你指定的模块,spec的属性可以打印查看
     spec = _find_spec(name, path)
     if spec is None:
-        raise ModuleNotFoundError(_ERR_MSG.format(parent), name=name)
+        raise ModuleNotFoundError(_ERR_MSG.format(name), name=name)
     else:
         if parent_spec:
             # Temporarily add child we are currently importing to parent's
@@ -1164,6 +1181,7 @@ def _find_and_load(name, import_):
 
     # Optimization: we avoid unneeded module locking if the module
     # already exists in sys.modules and is fully initialized.
+    # 由_gcd_import调用，用于找到并加载模块
     module = sys.modules.get(name, _NEEDS_LOADING)
     if (module is _NEEDS_LOADING or
         getattr(getattr(module, "__spec__", None), "_initializing", False)):
@@ -1195,6 +1213,7 @@ def _gcd_import(name, package=None, level=0):
     the loader did not.
 
     """
+    # 被__import__调用，用于加载模块进内存
     _sanity_check(name, package, level)
     if level > 0:
         name = _resolve_name(name, package, level)
@@ -1276,7 +1295,7 @@ def __import__(name, globals=None, locals=None, fromlist=(), level=0):
     import (e.g. ``from ..pkg import mod`` would have a 'level' of 2).
 
     """
-    print("......................import")
+    # import会进入这里
     if level == 0:
         module = _gcd_import(name)
     else:
